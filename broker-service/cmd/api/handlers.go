@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/rpc"
 )
 
 type RequestPayload struct {
@@ -60,7 +61,8 @@ func (app *Config) HandleSubmition(w http.ResponseWriter, r *http.Request) {
 	case "auth":
 		app.authenticate(w, reqPayload.Auth)
 	case "log":
-		app.logEventViaRabbit(w, reqPayload.Log)
+		app.logItemViaRPC(w, reqPayload.Log)
+		// app.logEventViaRabbit(w, reqPayload.Log)
 		// app.logItem(w, reqPayload.Log)
 	case "mail":
 		app.sendMail(w, reqPayload.Mail)
@@ -119,6 +121,39 @@ func (app *Config) authenticate(w http.ResponseWriter, a AuthPayload) {
 	payload.Error = false
 	payload.Message = "Authenticated"
 	payload.Data = jsonFromService.Data
+
+	app.writeJSON(w, http.StatusAccepted, payload)
+}
+
+func (app *Config) sendMail(w http.ResponseWriter, msg MailPayload) {
+	jsonData, _ := json.MarshalIndent(msg, "", "\t")
+
+	mailServiceUrl := "http://mailer-service/send"
+
+	request, err := http.NewRequest("POST", mailServiceUrl, bytes.NewBuffer(jsonData))
+	if err != nil {
+		app.errorJSON(w, err)
+		return
+	}
+
+	request.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	response, err := client.Do(request)
+	if err != nil {
+		app.errorJSON(w, err)
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusAccepted {
+		app.errorJSON(w, errors.New(fmt.Sprintf("error calling mail service of status code: %s", response.StatusCode)))
+		return
+	}
+
+	var payload jsonResponse
+	payload.Error = false
+	payload.Message = "Message sent to " + msg.To
 
 	app.writeJSON(w, http.StatusAccepted, payload)
 }
@@ -192,35 +227,34 @@ func (app *Config) pushToQueue(name, msg string) error {
 	return nil
 }
 
-func (app *Config) sendMail(w http.ResponseWriter, msg MailPayload) {
-	jsonData, _ := json.MarshalIndent(msg, "", "\t")
+type RPCPayload struct {
+	Name string
+	Data string
+}
 
-	mailServiceUrl := "http://mailer-service/send"
-
-	request, err := http.NewRequest("POST", mailServiceUrl, bytes.NewBuffer(jsonData))
+func (app *Config) logItemViaRPC(w http.ResponseWriter, l LogPayload) {
+	client, err := rpc.Dial("tcp", "logger-service:5001")
 	if err != nil {
 		app.errorJSON(w, err)
 		return
 	}
 
-	request.Header.Set("Content-Type", "application/json")
+	rpcPayload := RPCPayload{
+		Name: l.Name,
+		Data: l.Data,
+	}
 
-	client := &http.Client{}
-	response, err := client.Do(request)
+	var result string
+	err = client.Call("RPCServer.LogInfo", rpcPayload, &result)
 	if err != nil {
 		app.errorJSON(w, err)
 		return
 	}
-	defer response.Body.Close()
 
-	if response.StatusCode != http.StatusAccepted {
-		app.errorJSON(w, errors.New(fmt.Sprintf("error calling mail service of status code: %s", response.StatusCode)))
-		return
+	payload := jsonResponse{
+		Error:   false,
+		Message: result,
 	}
-
-	var payload jsonResponse
-	payload.Error = false
-	payload.Message = "Message sent to " + msg.To
 
 	app.writeJSON(w, http.StatusAccepted, payload)
 }
